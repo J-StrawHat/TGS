@@ -29,8 +29,8 @@ static int g_block_x = 1, g_block_y = 1, g_block_z = 1;
 static long long g_current_rate[GPU_MAX_NUM] = {};
 static long long g_rate_counter[GPU_MAX_NUM] = {};
 static int g_active_gpu[GPU_MAX_NUM] = {};
-static CUuuid g_uuid[GPU_MAX_NUM];
-static int g_gpu_id[GPU_MAX_NUM];
+static CUuuid g_uuid[GPU_MAX_NUM]; // 用于标识 device 的 uuid
+static int g_gpu_id[GPU_MAX_NUM]; // 用于标识 device 的 gpu_id (0-7)
 
 const size_t g_spare_memory = 1ull << 30;
 
@@ -119,6 +119,13 @@ static int open_clientfd(CUdevice device) {
 }
 
 
+/**
+ * 调用顺序：initialization : 
+ *         cuCtxGetDevice -> (若该 device 未激活) initialization
+ *                                            -> cuDeviceGetUuid 得到设备的 uuid 并转换成 gpu_id
+ *                                            -> activate_rate_watcher -> 创建 rate_watcher 线程 -> tgs_set_cpu_affinity
+ *                                            -> activate_rate_monitor
+*/
 static inline void rate_estimator(const long long kernel_size) {
   CUdevice device = 0;
   const CUresult ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &device);
@@ -329,20 +336,20 @@ static void activate_rate_monitor(CUdevice device) {
 }
 
 static inline void initialization(CUdevice device) {
-  g_active_gpu[device] = 1;
+  g_active_gpu[device] = 1; // 激活该设备 
   
   fprintf(stderr, "initialize device %d\n", device);
 
-  CUresult ret = CUDA_ENTRY_CALL(cuda_library_entry, cuDeviceGetUuid, &g_uuid[device], device);
+  CUresult ret = CUDA_ENTRY_CALL(cuda_library_entry, cuDeviceGetUuid, &g_uuid[device], device); // 获取设备的 uuid
   if (ret != CUDA_SUCCESS) {
     LOGGER(FATAL, "cuDeviceGetUuid error\n");
   }
 
   int gpu_id = 0;
   for (int i = 0; i < 16; ++i) {
-    gpu_id += (int)g_uuid[device].bytes[i];
+    gpu_id += (int)g_uuid[device].bytes[i]; // 将 uuid 的每一字节相加
   }
-  gpu_id = (gpu_id % 8 + 8) % 8;
+  gpu_id = (gpu_id % 8 + 8) % 8; // 取余数，保证 gpu_id 在 [0, 7] 之间
   g_gpu_id[device] = gpu_id;
 
   activate_rate_watcher(device);

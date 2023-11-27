@@ -1,3 +1,8 @@
+/**
+ * @file loader.c
+ * @brief 动态加载 libcuda.so 以及 libnvidia-ml.so ，根据 cuda_library_entry 中的函数名 name ，将对应的函数地址记录到 fn_ptr
+*/
+
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -722,9 +727,9 @@ static void UNUSED bug_on() {
 }
 
 /** register once set */
-static pthread_once_t g_cuda_set = PTHREAD_ONCE_INIT;
+static pthread_once_t g_cuda_set = PTHREAD_ONCE_INIT; // 用于保证关联的函数只被调用一次
 
-char driver_version[FILENAME_MAX] = "450.51.06";
+char driver_version[FILENAME_MAX] = "450.51.06"; // NVIDIA 驱动程序的版本号，默认值是 450.51.06，可通过函数 read_version_from_proc 进行修改
 
 static void load_driver_libraries() {
   void *table = NULL;
@@ -732,16 +737,19 @@ static void load_driver_libraries() {
   int i;
 
   snprintf(driver_filename, FILENAME_MAX - 1, "%s.%s", DRIVER_ML_LIBRARY_PREFIX,
-           driver_version);
+           driver_version); // 构造 NVIDIA 驱动程序库 libnvidia-ml.so 的完整文件名（前缀 + 版本号）
   driver_filename[FILENAME_MAX - 1] = '\0';
 
-  table = dlopen(driver_filename, RTLD_NOW | RTLD_NODELETE);
+  table = dlopen(driver_filename, RTLD_NOW | RTLD_NODELETE); 
+  // 打开 NVIDIA 驱动程序库
+  // RTLD_NOW：立即解析库中的符号，所有的函数和变量地址都会在 dlopen 调用期间被确定和设置好。与 RTLD_LAZY （即直到实际使用这些符号，如调用函数时，才进行解析）是相对的，
+  // RTLD_NODELETE：dlclose 调用时不卸载库，也就是说库在进程的整个生命周期内都保持加载状态
   if (unlikely(!table)) {
     LOGGER(FATAL, "can't find library %s", driver_filename);
   }
 
   for (i = 0; i < NVML_ENTRY_END; i++) {
-    nvml_library_entry[i].fn_ptr = dlsym(table, nvml_library_entry[i].name);
+    nvml_library_entry[i].fn_ptr = dlsym(table, nvml_library_entry[i].name); // 从库中获取函数地址（指针），记录到对应的 entry 列表中的 fn_ptr 字段
     if (unlikely(!nvml_library_entry[i].fn_ptr)) {
       LOGGER(4, "can't find function %s in %s", nvml_library_entry[i].name,
              driver_filename);
@@ -751,12 +759,12 @@ static void load_driver_libraries() {
   dlclose(table);
 }
 
-static void load_cuda_single_library(int idx) {
+static void load_cuda_single_library(int idx) { // idx 为 CUDA 库中特定函数在 entry 列表中的索引
   void *table = NULL;
   char cuda_filename[FILENAME_MAX];
 
   snprintf(cuda_filename, FILENAME_MAX - 1, "%s.%s", CUDA_LIBRARY_PREFIX,
-           driver_version);
+           driver_version); // 构造 CUDA 库 libcuda.so 的完整文件名（前缀 + 版本号）
   cuda_filename[FILENAME_MAX - 1] = '\0';
 
   table = dlopen(cuda_filename, RTLD_NOW | RTLD_NODELETE);
@@ -773,7 +781,7 @@ static void load_cuda_single_library(int idx) {
   dlclose(table);
 }
 
-void load_cuda_libraries() {
+void load_cuda_libraries() { // 加载 CUDA 库 libcuda.so 中的所有函数
   void *table = NULL;
   int i = 0;
   char cuda_filename[FILENAME_MAX];
@@ -833,6 +841,7 @@ static void matchRegex(const char *pattern, const char *matchString,
   return;
 }
 
+// 从系统中提取出 NVIDIA 驱动程序的版本号并存至 version ，如果提取失败则 version 为 450.51.06
 static void read_version_from_proc(char *version) {
   char *line = NULL;
   size_t len = 0;
@@ -843,10 +852,10 @@ static void read_version_from_proc(char *version) {
            strerror(errno));
     return;
   }
-
+  // 通过 NVIDIA 驱动程序版本信息文件 "/proc/driver/nvidia/version" ，可以查看本系统的 NVIDIA 驱动程序版本号
   while ((getline(&line, &len, fp) != -1)) {
     if (strncmp(line, "NVRM", 4) == 0) {
-      matchRegex(DRIVER_VERSION_MATCH_PATTERN, line, version);
+      matchRegex(DRIVER_VERSION_MATCH_PATTERN, line, version); // 通过正则表达式匹配，提取版本号
       break;
     }
   }
@@ -854,11 +863,14 @@ static void read_version_from_proc(char *version) {
 }
 
 void load_sim(){
-  read_version_from_proc(driver_version);
-  load_cuda_single_library(CUDA_ENTRY_ENUM(cuDriverGetVersion));
-  load_cuda_libraries();
-  load_driver_libraries();
+  read_version_from_proc(driver_version); 
+  load_cuda_single_library(CUDA_ENTRY_ENUM(cuDriverGetVersion)); // 从 CUDA 库 libcuda.so 中提取 cuDriverGetVersion 函数的地址
+  load_cuda_libraries(); // 加载 CUDA 库 libcuda.so 中的所有函数
+  // ? 为什么要先加载 cuDriverGetVersion 呢？可能是验证库的可用性
+  load_driver_libraries(); // 加载 libnvidia-ml.so
 }
+
+// 确保无论 load_necessary_data 被调用多少次，load_sim 只会被执行一次
 void load_necessary_data() {
   pthread_once(&g_cuda_set, load_sim);
 }

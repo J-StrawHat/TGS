@@ -11,7 +11,7 @@ class Trainer(object):
     def __init__(self, worker_ip, worker_port, trainer_ip, trainer_port, job_id, batch_size) -> None:
         super().__init__()
 
-        self._trainer_ip = trainer_ip
+        self._trainer_ip = trainer_ip # 容器的IP
         self._trainer_port = trainer_port
         self._job_id = job_id
         self._batch_size = batch_size
@@ -20,7 +20,7 @@ class Trainer(object):
         self._start_time = time.time()
         self._finished_iteraions = 0
 
-        self._client_for_scheduler = trainer_client.TrainerClientForScheduler(self._logger, worker_ip, worker_port)
+        self._client_for_scheduler = trainer_client.TrainerClientForScheduler(self._logger, worker_ip, worker_port) # 传入 worker（scheduler_ip） 的 IP 和端口
         self.init_stats()
 
         self._logger.info(f'job {self._job_id}, trainer, start, {self._start_time}')
@@ -38,11 +38,12 @@ class Trainer(object):
         if self._fd != None:
             print('%lf %lf' % (time.time(), self._batch_size / iteration_time), file=self._fd)
 
-
+    # 每个训练 epoch 将会调用该函数
     def record(self, iteration_time):
         self.update_stats(iteration_time)
 
         if time.time() - self._last_report_time >= 10:
+            # 每 10s 向 worker(scheduler) 发送一次 ReportStatsRequest 请求
             self._client_for_scheduler.report_stats(self._job_id, self._finished_iteraions)
             self._finished_iteraions = 0
             self._last_report_time = time.time()

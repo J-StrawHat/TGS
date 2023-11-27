@@ -3,14 +3,14 @@ import os
 from time import time
 import utils
 
-
+# 作业信息类，是未分配给 worker GPU 、待执行的作业
 class JobInfo(object):
     def __init__(self, job_id, job_name, batch_size, iterations, num_gpus, priority, thread_percentage, image_name, antman_config, antman_status) -> None:
         super().__init__()
         assert num_gpus <= 2
 
         self.job_id = job_id
-        self.job_name = job_name
+        self.job_name = job_name # 即训练模型的名称（model_name）
         self.batch_size = batch_size
         self.iterations = iterations
         self.num_gpus = num_gpus
@@ -21,7 +21,7 @@ class JobInfo(object):
         self.antman_config = antman_config
         self.antman_status = antman_status
 
-
+# 被 worker GPU 执行的任务类
 class Task(object):
     def __init__(self, job_info: JobInfo, scheduler_ip, vcuda_mounts: dict, need_throughput) -> None:
         super().__init__()
@@ -36,7 +36,7 @@ class Task(object):
         self._thread_percentage = job_info.thread_percentage
         self.image_name = job_info.image_name
         self._scheduler_ip = scheduler_ip
-        self._vcuda_mounts = vcuda_mounts
+        self._vcuda_mounts = vcuda_mounts # 即 tgs_mounts
         self.need_throughput = need_throughput
         self.throughputs = list()
         self._timestamp = None
@@ -105,7 +105,7 @@ class Task(object):
         bash_cmd = ""
         if num_gpus == 1:
             bash_cmd = f'python /cluster/workloads/pytorch_imagenet_torchvision.py --iterations {self._iterations} --batch-size {self._batch_size} --model {self._job_name} --train-dir /cluster/datasets/tiny-imagenet-200/train'
-        else:
+        else: #todo: 暂时不看，因为 csv 文件中是 1
             bash_cmd = f'horovodrun -np {num_gpus} -H localhost:{num_gpus} python /cluster/workloads/horovod_imagenet_torchvision.py --iterations {self._iterations} --batch-size {self._batch_size} --model {self._job_name} --train-dir /cluster/datasets/tiny-imagenet-200/train'
         bash_cmd += f' --scheduler_ip {self._scheduler_ip}'
         bash_cmd += f' --trainer_port {self.get_idle_port()}'
@@ -177,7 +177,7 @@ class Task(object):
             if self._job_name == 'megatron-gpt':
                 bash_cmd = 'cd /cluster/workloads/megatron/ && ' + 'nice -n -20 ' + bash_cmd
             else:
-                bash_cmd = 'nice -n -20 ' + bash_cmd
+                bash_cmd = 'nice -n -20 ' + bash_cmd # 执行的程序的优先级设置为最高优先级
         else:
             if self._job_name == 'megatron-gpt':
                 bash_cmd = 'cd /cluster/workloads/megatron/ && ' + bash_cmd
@@ -253,11 +253,11 @@ class Task(object):
         else:
             cmd = [
                 'docker', 'run', # '--rm',
-                    '--name', self.container_name,
-                    '--gpus', f'"device={self._gpus}"',
-                    '--ipc', 'host',
+                    '--name', self.container_name,      # 容器名称
+                    '--gpus', f'"device={self._gpus}"',  
+                    '--ipc', 'host',                    # 容器将使用宿主机的IPC命名空间
                     '--network', 'host',
-                    '--cap-add', 'sys_nice',
+                    '--cap-add', 'sys_nice',            # 允许容器提升优先级
                     '-u', 'root',
                     '--cpuset-cpus', '0-9,20-29', # FIXME: hard code
             ]
@@ -292,12 +292,12 @@ class Task(object):
 
         with open(self.log_path, 'w+') as f:
             self._handler = subprocess.Popen(
-                cmd,
+                cmd, # 运行容器
                 stdout=f,
-                stderr=f,
+                stderr=f, # 将其输出和错误信息重定向到一个指定的日志文件
                 env=envs,
                 # shell=True
-            )
+            ) # 保持对该进程的引用
 
         return cmd
     
@@ -319,9 +319,10 @@ class Task(object):
         return 'job_logs/' + str(self._job_id) + '_' + str(self._job_name) + '.txt'
 
 
-    @property
+    @property # 属性装饰器
     def container_name(self):
         return f'job_{self._job_id}'
+    # 当类的实例上访问 container_name 时，实际上会执行这个方法。
 
 
     # @property
@@ -331,10 +332,10 @@ class Task(object):
     #     else:
     #         raise Exception()
     
-
+    # 跟踪任务的进度（通过完成的迭代次数）并计算任务的吞吐量
     def update(self, finished_iterations):
         self._finished_iterations += finished_iterations
-        throughput = finished_iterations * 10 / (time() - self.last_time)
+        throughput = finished_iterations * 10 / (time() - self.last_time) #? 为什么是10
         self.throughputs.append(throughput)
         self.last_time = time()
         return throughput

@@ -1,9 +1,14 @@
+/**
+ * @file cuda_originals.c
+ * @brief 大部分的 CUDA Driver API 通过动态加载的方式进行调用，并且不对函数的行为进行修改
+*/
+
 #include <assert.h>
 
 #include "../include/cuda-helper.h"
 #include "../include/hijack.h"
 
-extern entry_t cuda_library_entry[];
+extern entry_t cuda_library_entry[]; //每个 entry 有 fn_ptr 和 name ，已在 loader.c 中定义
 
 CUresult cuDeviceGet(CUdevice *device, int ordinal) {
   return CUDA_ENTRY_CALL(cuda_library_entry, cuDeviceGet, device, ordinal);

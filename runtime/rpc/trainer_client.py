@@ -41,10 +41,13 @@ class TrainerClientForScheduler(object):
     def report_stats(self, job_id, finished_iterations):
         try:
             self._logger.info(f'job {job_id}, report, {finished_iterations}')
-            with grpc.insecure_channel(self.addr) as channel:
+            with grpc.insecure_channel(self.addr) as channel: # with 语句确保在代码块结束后，通道被正确关闭。
                 request = ReportStatsRequest(job_id=job_id, finished_iterations=finished_iterations)
+                # 向 scheduler 发送 ReportStatsRequest 请求
                 stub = t2s_rpc.TrainerToSchedulerStub(channel)
+                # 这个stub是用于发起RPC调用的客户端对象
                 response = stub.ReportStats(request)
+                # 通过stub发送RPC请求，并等待响应。
                 assert response.success == True
         except Exception as e:
             self._logger.info(f'job {job_id}, report, fail, {e}')

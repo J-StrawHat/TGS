@@ -16,10 +16,13 @@ extern "C" {
  */
 #define CUDA_LIBRARY_PREFIX "libcuda.so"
 
-#define CUDA_ENTRY_ENUM(x) ENTRY_##x
+// 将函数名称转换为枚举常量
+#define CUDA_ENTRY_ENUM(x) ENTRY_##x 
 
+// 从cuda_library_entry[] 中查找 symbol 的函数指针
 #define CUDA_FIND_ENTRY(table, sym) ({ (table)[CUDA_ENTRY_ENUM(sym)].fn_ptr; })
 
+// 找到函数指针后赋给 _entry，通过这个函数指针调用函数
 #define CUDA_ENTRY_CALL(table, sym, ...)             \
   ({                                                 \
     cuda_sym_t _entry = CUDA_FIND_ENTRY(table, sym); \
@@ -43,9 +46,9 @@ extern "C" {
  */
 typedef enum {
   /** cuInit */
-  CUDA_ENTRY_ENUM(cuInit),
+  CUDA_ENTRY_ENUM(cuInit), //ENTRY_cuInit
   /** cuDeviceGet */
-  CUDA_ENTRY_ENUM(cuDeviceGet),
+  CUDA_ENTRY_ENUM(cuDeviceGet), //ENTRY_cuDeviceGet
   /** cuDeviceGetCount */
   CUDA_ENTRY_ENUM(cuDeviceGetCount),
   /** cuDeviceGetName */

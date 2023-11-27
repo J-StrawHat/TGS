@@ -1,3 +1,7 @@
+/**
+ * @file nvml_entry.c
+ * @brief 与 cuda_originals.c 类似，这里是对 nvml 库的 hook
+*/
 #include <pthread.h>
 
 #include "../include/hijack.h"

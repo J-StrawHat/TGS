@@ -15,33 +15,39 @@ from task import Task, JobInfo
 
 
 class Worker(object):
+    # 初始化Worker对象，接收：trace文件路径、工作节点IP和端口、GPU资源、挂载点、日志路径等参数
+    # 其中，trace文件路径指定了trace配置文件（如test_tgs.csv），用于提取任务信息。
+    # 工作节点IP和端口用于创建RPC服务器，以接收来自调度器的RPC请求。
+    # GPU资源指定了该工作节点可用的GPU资源。
+    # 挂载点指定了该工作节点可用的挂载点。
     def __init__(self, trace_file_path: str, worker_ip, worker_port, gpus: str, mount: list, log_path: str, need_throughput) -> None:
         super().__init__()
 
         self._logger = utils.make_logger(__name__)
         self._writer = utils.Writer(log_path)
 
-        self.parse_trace_config(trace_file_path)
+        self.parse_trace_config(trace_file_path) # 提取低优先级与高优先级的任务信息
         
         self._worker_ip = worker_ip
         self._worker_port = worker_port
         self._worker_id = None
         self.need_throughput = need_throughput
         
-        self._gpus = gpus.split(',')
+        self._gpus = gpus.split(',') # 该工作节点可用的GPU资源，如'0,1,2,3'，默认为0号GPU
         self._num_gpus = len(self._gpus)
 
         self._mount = mount if mount != None else []
 
-        self.tgs_init()
+        self.tgs_init() # 编译拦截库
         
         self._tasks = dict()
 
-        self._server_for_trainer = self.make_server_for_trainer(worker_port)
+        self._server_for_trainer = self.make_server_for_trainer(worker_port) # 创建并启动 RPC 服务
 
-        self._start_time = time.time()
+        self._start_time = time.time() # 记录worker启动时间
     
-
+    # 解析trace配置文件（如test_tgs.csv），可能用于提取任务信息。
+    # trace配置文件中的每一行都是一个作业的规范，包括：提交时间、模型名称、批大小、迭代次数、是否有GPU需求、优先级、Docker镜像名称等。
     def parse_trace_config(self, trace_file_path):
         assert trace_file_path[-4:] == '.csv'
         trace_file = open(trace_file_path, 'r')
@@ -51,12 +57,12 @@ class Worker(object):
         self._submit_queue = list()
         self.next_job_id = 1
         for row in reader:
-            self.parse_job(row)
+            self.parse_job(row) 
         
         trace_file.close()
-        self._submit_queue = sorted(self._submit_queue, key=lambda x: (x['submit_time'], 0 if x['priority'] == 'high' else 1))
+        self._submit_queue = sorted(self._submit_queue, key=lambda x: (x['submit_time'], 0 if x['priority'] == 'high' else 1)) # 先按提交时间排序，再按优先级排序
 
-
+    # 解析单个作业的具体信息。
     def parse_job(self, job_spec):
         assert 'submit_time' in job_spec
         assert 'model_name' in job_spec
@@ -82,15 +88,16 @@ class Worker(object):
             'antman_status': job_spec['antman_status'] if 'antman_status' in job_spec else None,
         }
         
-        self._submit_queue.append(spec)
+        self._submit_queue.append(spec) # _submit_queue 用于存储所有作业的具体信息
         self.next_job_id += 1
 
-
+    # 用于初始化GPU共享或其他任务调度相关的设置。
+    # 实际上是调用了hijack/build.sh脚本，编译拦截库，并分别复制到hijack/high-priority-lib和hijack/low-priority-lib目录下。
     def tgs_init(self):
         assert subprocess.call(['./hijack/build.sh']) == 0
         root_path = os.path.abspath('.')
 
-        self.tgs_mounts = {
+        self.tgs_mounts = { # 建立宿主机上的路径和容器内的路径之间的映射
             'high': [
                 root_path + ':/cluster',
                 root_path + '/hijack/high-priority-lib/libcontroller.so:/libcontroller.so:ro',
@@ -129,7 +136,7 @@ class Worker(object):
             ],
         }
 
-
+    # 从 _task 中检查是否有作业已经完成，如果有，则将其从 _task 中移除，并将其记录到日志中，同时返回。
     def check_tasks(self):
         finished_tasks = []
 
@@ -147,11 +154,12 @@ class Worker(object):
         
         return finished_tasks
     
-
+    # 执行一个作业，可能包括在容器中运行深度学习模型。
     def execute(self, job_info) -> bool:
         success = True
-
+        # 作业转换为 worker 的任务
         task = Task(job_info, self._worker_ip, self.tgs_mounts, self.need_throughput)
+        # worker 的 _tasks 列表中记录该作业 id 所对应的任务类实例
         self._tasks[task._job_id] = task
         cmd = task.run(self._mount)
 
@@ -159,7 +167,7 @@ class Worker(object):
 
         return success
     
-
+    # 终止一个正在运行的作业。
     def kill(self, job_info) -> bool:
         job_id = job_info.job_id
 
@@ -173,7 +181,7 @@ class Worker(object):
 
         return True
     
-
+    # 查询节点（如GPU）的统计信息。
     def query_node_stats(self):
         utilizations = []
         pynvml.nvmlInit()
@@ -187,7 +195,7 @@ class Worker(object):
         utilizations = ','.join(utilizations)
         return utilizations
 
-
+    # ReportStats RPC 对应的具体业务逻辑，报告作业的状态，可能包括完成的迭代次数等。
     def _report_stats_impl(self, job_id, finished_iterations) -> bool:
         success = True
         assert job_id in self._tasks
@@ -202,18 +210,18 @@ class Worker(object):
     def make_server_for_trainer(self, port):
         callbacks = {
             'ReportStats' : self._report_stats_impl,
-        }
+        } # 当 ReportStats RPC调用发生时，应该调用 _report_stats_impl 方法处理请求
 
-        return scheduler_server.serve(port, self._logger, callbacks)
+        return scheduler_server.serve(port, self._logger, callbacks) # 创建并启动 RPC 服务，该服务将作为 worker (或者说，scheduler )和 trainer 之间的通信桥梁
 
 
     def has_ready_jobs(self):
         current_time = time.time()
-        elapsed_time = current_time - self._start_time
+        elapsed_time = current_time - self._start_time # worker 的运行时间
 
         if len(self._submit_queue) > 0:
-            job_spec = self._submit_queue[0]
-            if job_spec['submit_time'] <= elapsed_time:
+            job_spec = self._submit_queue[0] # 检查队首（实际上就是list的首个元素）的作业
+            if job_spec['submit_time'] <= elapsed_time: # 注意到 submit_time 一般是 0
                 return True
         
         return False
@@ -242,7 +250,7 @@ if __name__ == '__main__':
     subprocess.call('docker stop $(docker ps -q)', shell=True)
     subprocess.call('docker rm $(docker ps -aq)', shell=True)
 
-    worker_ip = utils.get_host_ip()
+    worker_ip = utils.get_host_ip() # 获取本机IP地址
     worker = Worker(args.trace, worker_ip, args.worker_port, args.gpus, args.mount, args.log_path, args.need_throughput)
 
     runnable_tasks = list()
@@ -250,8 +258,8 @@ if __name__ == '__main__':
     machine = [{
         'Co-ex': list(),
         'mps': list()
-    } for i in range(len(gpu_list))]
-    while len(worker._submit_queue) + len(worker._tasks) + len(runnable_tasks) > 0:
+    } for i in range(len(gpu_list))] # 用于记录每个GPU上正在运行的作业，以及对应的模式或者优先级，对于 TGS 而言，是 high 或者 low
+    while len(worker._submit_queue) + len(worker._tasks) + len(runnable_tasks) > 0: # 定期检查需要提交的作业以及正在运行的作业
         while worker.has_ready_jobs():
             job_spec = worker._submit_queue.pop(0)
             jobinfo = JobInfo(job_spec['job_id'], job_spec['model_name'], job_spec['batch_size'],
@@ -259,7 +267,7 @@ if __name__ == '__main__':
                  job_spec['thread_percentage'], job_spec['image_name'],
                  job_spec['antman_config'], job_spec['antman_status']
                 )
-            runnable_tasks.append(jobinfo)
+            runnable_tasks.append(jobinfo) # 从 _submit_queue 中取出作业，放入 runnable_tasks 中
 
         finished_tasks = worker.check_tasks()
         for task in finished_tasks:
@@ -267,35 +275,35 @@ if __name__ == '__main__':
                 if task._priority in ['Co-ex', 'mps']:
                     machine[int(gpu_id)][jobinfo.priority].remove(task._job_id)
                 else:
-                    machine[int(gpu_id)].pop(task._priority)
+                    machine[int(gpu_id)].pop(task._priority) # 将该优先级的任务从 machine(即 GPU) 中移除
             # writer.save(task)
         
         new_runnable_tasks = []
         record_flag = (len(finished_tasks) != 0)
-        for jobinfo in runnable_tasks:
+        for jobinfo in runnable_tasks: # 将 runnable_tasks 中的作业分配给可用的 GPU
             available_gpus = 0
             for gpu_instance in machine:
-                if jobinfo.priority not in gpu_instance:
+                if jobinfo.priority not in gpu_instance: 
                     available_gpus += 1
                 elif jobinfo.priority in ['Co-ex', 'mps'] and len(gpu_instance[jobinfo.priority]) < 2:
                     available_gpus += 1
             
-            if available_gpus >= jobinfo.num_gpus:
+            if available_gpus >= jobinfo.num_gpus: # 如果可用的 GPU 数量大于等于作业所需的 GPU 数量，则将该作业分配给可用的 GPU
                 record_flag = True
-                used_gpus = []
-                for gpu_id, gpu_instance in enumerate(machine):
+                used_gpus = [] # 用于记录该作业所使用的 GPU
+                for gpu_id, gpu_instance in enumerate(machine): # 
                     if jobinfo.priority not in gpu_instance:
-                        used_gpus.append(str(gpu_id))
-                        gpu_instance[jobinfo.priority] = jobinfo.job_id
+                        used_gpus.append(str(gpu_id)) 
+                        gpu_instance[jobinfo.priority] = jobinfo.job_id # 在该 machine 中记录该优先级下的作业 id
                     elif jobinfo.priority in ['Co-ex', 'mps'] and len(gpu_instance[jobinfo.priority]) < 2:
                         used_gpus.append(str(gpu_id))
                         gpu_instance[jobinfo.priority].append(jobinfo.job_id)
                     
                     if len(used_gpus) == jobinfo.num_gpus:
                         break
-                jobinfo.gpus = ','.join(used_gpus)
+                jobinfo.gpus = ','.join(used_gpus) # 该作业所使用的 GPU 列表
                 worker.execute(jobinfo)
-            else:
+            else: # 可用的 GPU 数量不够，先放到 new_runnable_tasks 中
                 new_runnable_tasks.append(jobinfo)
 
         if record_flag:
