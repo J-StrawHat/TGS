@@ -59,11 +59,11 @@ struct MemRange {
   size_t count;
   CUdevice device;
   struct MemRange *successor, *precursor;
-};
+}; // 双向链表的节点
 
 static struct MemRange *list_head = NULL;
 static size_t list_size = 0;
-static pthread_mutex_t g_map_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_map_mutex = PTHREAD_MUTEX_INITIALIZER; // 静态互斥锁
 
 static void activate_rate_watcher();
 static void *rate_watcher(void *);
@@ -94,12 +94,12 @@ void init_list() {
 }
 
 
-void list_insert(struct MemRange *pos, struct MemRange *item) {
-  item->successor = pos->successor;
-  item->precursor = pos;
+void list_insert(struct MemRange *pos, struct MemRange *item) { // 在pos后插入item
+  item->successor = pos->successor; // 更新 item 的后继指针，指向 pos 的后继节点
+  item->precursor = pos;  // 更新 item 的前驱指针，指向 pos
   if (pos->successor)
-    pos->successor->precursor = item;
-  pos->successor = item;
+    pos->successor->precursor = item;  // 更新 item 的后继节点（即 pos 的原后继节点）的前驱指针
+  pos->successor = item; // 更新 item 的前驱节点（即 pos）的后继指针
   ++list_size;
 }
 
@@ -114,7 +114,7 @@ void list_delete(struct MemRange *item) {
   --list_size;
 }
 
-
+// 将申请的显存信息记录至双向链表中
 void allocate_mem(CUdeviceptr devPtr, size_t count, CUdevice device) {
   struct MemRange *item = (struct MemRange *)malloc(sizeof(struct MemRange));
   item->devPtr = devPtr;
@@ -126,12 +126,12 @@ void allocate_mem(CUdeviceptr devPtr, size_t count, CUdevice device) {
     init_list();
 
   pthread_mutex_lock(&g_map_mutex);
-  g_used_memory += count;
-  list_insert(list_head, item);
+  g_used_memory += count; // 更新已使用显存大小
+  list_insert(list_head, item); // 在 list_head 后插入 item
   pthread_mutex_unlock(&g_map_mutex);
 }
 
-
+// 从双向链表中根据设备指针删除对应的显存信息
 void delete_mem(CUdeviceptr devPtr) {
   if (list_head == NULL)
     init_list();
@@ -189,7 +189,7 @@ static int open_listenfd(CUdevice device) {
   int listenfd;
 
   /* Create local socket. */
-
+  // 创建一个 UNIX 域流套接字
   listenfd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (listenfd == -1) {
     fprintf(stderr, "socket failed: %s\n", strerror(errno));
@@ -204,7 +204,7 @@ static int open_listenfd(CUdevice device) {
   memset(&name, 0, sizeof(name));
 
   /* Bind socket to socket name. */
-
+  
   char uuid_str[37] = {};
   for (int i = 0; i < 16; ++i) {
     unsigned char byte = g_uuid[device].bytes[i];
@@ -220,13 +220,13 @@ static int open_listenfd(CUdevice device) {
   name.sun_family = AF_UNIX;
   strncpy(name.sun_path, SOCKET_PATH, sizeof(name.sun_path));
 
-  ret = unlink(SOCKET_PATH);
+  ret = unlink(SOCKET_PATH); // 删除该套接字名（套接字文件的路径）
   if (ret == -1) {
     if (!access(SOCKET_PATH, F_OK))
       fprintf(stderr, "unlink failed: %s\n", strerror(errno));
   }
 
-  ret = bind(listenfd, (const struct sockaddr *) &name, sizeof(name));
+  ret = bind(listenfd, (const struct sockaddr *) &name, sizeof(name)); // 为套接字绑定该套接字名（套接字文件的路径）
   if (ret == -1) {
     fprintf(stderr, "bind failed: %s\n", strerror(errno));
   }
@@ -237,7 +237,7 @@ static int open_listenfd(CUdevice device) {
   * can be waiting.
   */
 
-  ret = listen(listenfd, LISTENQ);
+  ret = listen(listenfd, LISTENQ); // 指定了套接字请求队列的大小。这个队列存储了那些已经由操作系统内核接收、但还没有被应用程序接受（通过 accept 调用）的连接。
   if (ret == -1) {
     fprintf(stderr, "listen failed: %s\n", strerror(errno));
   }
@@ -327,13 +327,13 @@ static void *memory_transfer_routine(CUdevice device) {
   const char *cuda_err_string = NULL;
 
   CUcontext cuContext;
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuDevicePrimaryCtxRetain, &cuContext, device);
+  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuDevicePrimaryCtxRetain, &cuContext, device); // 获取指定 CUDA 设备的主上下文
   if (unlikely(ret)) {
     LOGGER(FATAL, "cuDevicePrimaryCtxRetain error %s",
            cuda_error((CUresult)ret, &cuda_err_string));
   }
   
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxSetCurrent, cuContext);
+  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxSetCurrent, cuContext); // 设置当前线程的活动上下文，后续的 CUDA API 调用将在该上下文执行
   if (unlikely(ret)) {
     LOGGER(FATAL, "cuCtxSetCurrent error %s",
            cuda_error((CUresult)ret, &cuda_err_string));
@@ -343,6 +343,7 @@ static void *memory_transfer_routine(CUdevice device) {
 
   for (struct MemRange *it = list_head->successor; it; it = it->successor) 
     if (it->device == device) {
+      // 将低优先级任务容器中申请的显存（CUDA统一内存），从主机端预取到设备端
       ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemPrefetchAsync, it->devPtr, it->count, it->device, NULL);
       if (ret != CUDA_SUCCESS) {
         const char *error_name = NULL, *error_reason = NULL;
@@ -385,19 +386,19 @@ static void *limit_manager(void *v_device) {
   struct sockaddr_storage clientaddr;
   char client_hostname[MAXLINE], client_port[MAXLINE];
 
-  listenfd = open_listenfd(device);
+  listenfd = open_listenfd(device); // 监听套接字
   clientlen = sizeof(struct sockaddr_storage);
 
   
   while (1) {
-    if ((connfd = accept(listenfd, (struct sockaddr *)&clientaddr, &clientlen)) < 0)
+    if ((connfd = accept(listenfd, (struct sockaddr *)&clientaddr, &clientlen)) < 0) // 接受连接请求
       LOGGER(FATAL, "accept error\n");
     if ((ret = getnameinfo((const struct sockaddr *)&clientaddr, clientlen, client_hostname, MAXLINE,
-                           client_port, MAXLINE, 0)) != 0)
+                           client_port, MAXLINE, 0)) != 0) // 获取客户端的主机名和端口号
       LOGGER(FATAL, "getnameinfo error: %s\n", gai_strerror(ret));
     
     double max_rate = -1;
-    if (rio_readn(connfd, (void *)&max_rate, sizeof(double)) != sizeof(double)) {
+    if (rio_readn(connfd, (void *)&max_rate, sizeof(double)) != sizeof(double)) { // 读取高优先级任务容器所发送的最大速率
       continue;
     }
 
@@ -448,7 +449,7 @@ profile:
     }
     fprintf(stderr, "profile max rate: %lld\n", max_rate);
 
-    while (1) {
+    while (1) { // 不断地从高优先级任务容器中读取 Kernel 到达数量，估计 Kernel 到达速率，然后更新 Kernel 到达速率的限制
       double recv_counter = -1;
       ssize_t n = rio_readn(connfd, (void *)&recv_counter, sizeof(double));
       if (n != sizeof(double)) {
@@ -506,9 +507,9 @@ profile:
     }
     if ((ret = close(connfd)) < 0)
       LOGGER(FATAL, "close error\n");
-
+    // 直到高优先级任务完成后，才会跳出循环
     g_rate_limit[device] = 0;
-    activate_memory_transfer_routine(device);
+    activate_memory_transfer_routine(device); // 此时，将低优先级任务容器中申请的显存（CUDA统一内存），从主机端预取到设备端
     g_rate_control_flag[device] = 0;
   }
 }
@@ -565,7 +566,14 @@ static inline int launch_test(const long long kernel_size, const CUdevice device
   return g_rate_control_flag[device] == 1 && g_rate_counter[device] > g_rate_limit[device];
 }
 
-
+/**
+ * 对 Kernel 发送速率进行限制，同时也更新 Kernel 到达的数量
+ * 调用顺序：
+ * cuCtxGetDevice -> (若该 device 未激活) initialization
+ *                                    -> cuDeviceGetUuid 得到设备的 uuid 并转换成 gpu_id
+ *                                    -> activate_rate_watcher
+ *                                    -> activate_limit_manager
+*/
 static inline void rate_limiter(const long long kernel_size) {
   CUdevice device = 0;
   const CUresult ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &device);
@@ -581,7 +589,7 @@ static inline void rate_limiter(const long long kernel_size) {
   __sync_add_and_fetch_8(&g_rate_counter[device], kernel_size);
 }
 
-
+// 通过 Kernel 到达数量，估计 Kernel 到达速率，其作用类似于 高优先级任务容器中的 rate_monitor (不是他的 rate_watcher)
 static void *rate_watcher(void *v_device) {
   const CUdevice device = (uintptr_t)v_device;
   const unsigned long duration = 50;
@@ -593,9 +601,9 @@ static void *rate_watcher(void *v_device) {
   while (1) {
     nanosleep(&unit_time, NULL);
     
-    long long current_rate = g_rate_counter[device];
+    long long current_rate = g_rate_counter[device]; // Kernel Launch 会触发 rate_limiter 进行更新
     g_rate_counter[device] = 0;
-    g_current_rate[device] = current_rate;
+    g_current_rate[device] = current_rate; 
   }
   return NULL;
 }
@@ -616,9 +624,9 @@ static void activate_rate_watcher(CUdevice device) {
 
 
 static inline void initialization(const CUdevice device) {
-  g_active_gpu[device] = 1;
+  g_active_gpu[device] = 1; // 激活该设备 
 
-  CUresult ret = CUDA_ENTRY_CALL(cuda_library_entry, cuDeviceGetUuid, &g_uuid[device], device);
+  CUresult ret = CUDA_ENTRY_CALL(cuda_library_entry, cuDeviceGetUuid, &g_uuid[device], device); // 获取设备的 uuid
   if (ret != CUDA_SUCCESS) {
     LOGGER(FATAL, "cuDeviceGetUuid error\n");
   }
@@ -627,18 +635,18 @@ static inline void initialization(const CUdevice device) {
   for (int i = 0; i < 16; ++i) {
     gpu_id += (int)g_uuid[device].bytes[i];
   }
-  gpu_id = (gpu_id % 8 + 8) % 8;
+  gpu_id = (gpu_id % 8 + 8) % 8; // 取余数，保证 gpu_id 在 [0, 7] 之间
   g_gpu_id[device] = gpu_id;
 
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxResetPersistingL2Cache);
   if (ret != CUDA_SUCCESS) {
     fprintf(stderr, "cuCtxResetPersistingL2Cache error\n");
   }
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxSetLimit, CU_LIMIT_PERSISTING_L2_CACHE_SIZE, 0);
+  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxSetLimit, CU_LIMIT_PERSISTING_L2_CACHE_SIZE, 0); // 设置 CUDA 设备 L2 cache 的大小为 0 
   if (ret != CUDA_SUCCESS) {
     fprintf(stderr, "cuCtxSetLimit error, ret=%d\n", (int)ret);
   }
-
+  // 激活两个线程
   activate_rate_watcher(device);
   activate_limit_manager(device);
 }

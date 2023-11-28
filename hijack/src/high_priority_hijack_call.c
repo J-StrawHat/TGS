@@ -129,7 +129,7 @@ static int open_clientfd(CUdevice device) {
 
 
 /**
- * 更新 Kernel 到达的数量
+ * 更新 Kernel block 到达的数量
  * 调用顺序：
  * cuCtxGetDevice -> (若该 device 未激活) initialization
  *                                   -> cuDeviceGetUuid 得到设备的 uuid 并转换成 gpu_id
@@ -149,7 +149,7 @@ static inline void rate_estimator(const long long kernel_size) {
   __sync_add_and_fetch_8(&g_rate_counter[device], kernel_size); // 将 kernel_size 加到 g_rate_counter[device] 上（，并返回相加后的值），该操作是原子的，线程安全的
 }
 
-// 通过 Kernel 到达数量，估计 Kernel 到达速率
+// 通过 Kernel block 到达数量，估计 Kernel 到达速率
 static void *rate_monitor(void *v_device) {
   const CUdevice device = (uintptr_t)v_device;
   const unsigned long duration = 5000;
@@ -195,7 +195,7 @@ inline double shift_window(double rate_window[], const int WINDOW_SIZE, double r
   return max_window_rate;
 }
 
-// 通过 rate_monitor 计算的 Kernel 到达速率，估计一段时间窗口内的最大的 Kernel 到达速率，并将其发送给客户端
+// 通过 rate_monitor 计算的 Kernel 到达速率，估计一段时间窗口内的最大的 Kernel 到达速率，并将其发送给服务端（即低优先级任务的容器）
 static void *rate_watcher(void *v_device) {
   const CUdevice device = (uintptr_t)v_device;
   const unsigned long duration = 5000;
@@ -240,7 +240,7 @@ static void *rate_watcher(void *v_device) {
       else
         max_rate = max_window_rate;
     }
-    // 与客户端建立连接后，将当前的最大速率发送给客户端
+    // 与服务端（低优先级任务）建立连接后，将当前的最大速率发送给服务端
     if (rio_writen(clientfd, (void *)&max_rate, sizeof(double)) != sizeof(double)) {
       LOGGER(4, "rio_writen error\n");
       continue;
@@ -268,7 +268,7 @@ static void *rate_watcher(void *v_device) {
         max_rate = max_rate > max_window_rate ? max_rate : max_window_rate;
       else
         max_rate = max_window_rate;
-
+      // 将当前的速率发送给服务端
       if (rio_writen(clientfd, (void *)&rate_counter, sizeof(double)) != sizeof(double)) {
         LOGGER(4, "rio_writen error\n");
         break;
@@ -361,7 +361,7 @@ static inline void initialization(CUdevice device) {
   }
   gpu_id = (gpu_id % 8 + 8) % 8; // 取余数，保证 gpu_id 在 [0, 7] 之间
   g_gpu_id[device] = gpu_id;
-
+  // 激活两个线程
   activate_rate_watcher(device);
   activate_rate_monitor(device);
 }
@@ -403,7 +403,7 @@ CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize,
 
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAdvise, *dptr, bytesize, CU_MEM_ADVISE_SET_PREFERRED_LOCATION,
                          device); 
-  // CUDA 运行时将统一内存分配的内存"首选位置"设置为指定的 GPU 设备
+  // CUDA 运行时将统一内存分配的内存"首选位置"设置为指定的 GPU 设备（注意这个 API 本身既可以设置 host 设备也可以设置 GPU 设备）
   return ret;
 }
 
