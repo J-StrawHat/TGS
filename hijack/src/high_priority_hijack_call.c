@@ -1,3 +1,7 @@
+/**
+ * @file high_priority_hijack_call.c
+ * @brief 对 Kernel Launch 相关 API 进行劫持，监控 Kernel 到达速率并汇报至低优先级任务的容器。同时对于显存的申请，会先使用统一内存的方式申请，然后再使用 cuMemAdvise 将内存尽可能地迁移到 GPU 上。
+*/
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -32,7 +36,7 @@ static int g_active_gpu[GPU_MAX_NUM] = {};
 static CUuuid g_uuid[GPU_MAX_NUM]; // 用于标识 device 的 uuid
 static int g_gpu_id[GPU_MAX_NUM]; // 用于标识 device 的 gpu_id (0-7)
 
-const size_t g_spare_memory = 1ull << 30;
+const size_t g_spare_memory = 1ull << 30; //预留的显存大小，在下面的 Driver API 报告的显存大小时会比 GPU 实际拥有的稍少的数值。为了避免上层的 AI 训练框架将显存占满
 
 static void activate_rate_watcher();
 static void *rate_watcher(void *);
@@ -49,6 +53,7 @@ const char *cuda_error(CUresult code, const char **p) {
   return *p;
 }
 
+// 将 usrbuf 指向的完整数据（总共 n 字节）写入文件描述符 fd 指定的文件或套接字
 static ssize_t rio_writen(int fd, void *usrbuf, size_t n) {
   size_t nleft = n;
   ssize_t nwritten;
@@ -67,7 +72,7 @@ static ssize_t rio_writen(int fd, void *usrbuf, size_t n) {
   return n;
 }
 
-
+// 创建套接字
 static int open_clientfd(CUdevice device) {
   char SOCKET_PATH[108];
   struct sockaddr_un addr;
@@ -76,7 +81,11 @@ static int open_clientfd(CUdevice device) {
 
   /* Create local socket. */
 
-  clientfd = socket(AF_UNIX, SOCK_STREAM, 0);
+  clientfd = socket(AF_UNIX, SOCK_STREAM, 0); 
+  // 创建一个 UNIX 域流套接字并返回文件描述符，其中：
+  // - AF_UNIX 是 地址族(Address Family)，用于指定套接字使用的协议族。而 AF_UNIX 表示套接字用于在同一台机器上的进程间通信（IPC），而不是用于网络通信。该套接字使用文件系统中的路径作为其地址。如果是跨网络通信，需要使用 AF_INET 或 AF_INET6
+  // - SOCK_STREAM 是一个套接字类型，表示套接字是一个顺序的、可靠的、双向的、基于连接的字节流。通常与 TCP 协议一起使用
+  // - 0 表示使用默认的协议
   if (clientfd == -1) {
     LOGGER(FATAL, "socket failed: %s\n", strerror(errno));
   }
@@ -90,7 +99,7 @@ static int open_clientfd(CUdevice device) {
   memset(&addr, 0, sizeof(addr));
 
   /* Connect socket to socket address. */
-
+  // 将设备的 UUID 转换为字符串
   char uuid_str[37] = {};
   for (int i = 0; i < 16; ++i) {
     unsigned char byte = g_uuid[device].bytes[i];
@@ -101,14 +110,14 @@ static int open_clientfd(CUdevice device) {
     uuid_str[i] = uuid_str[i] >= 10 ? uuid_str[i] - 10 + 'a' : uuid_str[i] + '0';
   uuid_str[32] = 0;
 
-  sprintf(SOCKET_PATH, "/etc/gsharing/rate_%s.sock", uuid_str);
-  if (access(SOCKET_PATH, 0) != 0)
+  sprintf(SOCKET_PATH, "/etc/gsharing/rate_%s.sock", uuid_str); // 生成套接字文件的路径：/etc/gsharing/rate_<uuid>.sock
+  if (access(SOCKET_PATH, 0) != 0) // 检查是否存在这个套接字文件
     return -1;
 
-  addr.sun_family = AF_UNIX;
+  addr.sun_family = AF_UNIX; // 由于 addr 被清空过，需要重新设置地址族，以及下面的 UNIX 域套接字的文件系统路径
   strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path));
 
-  ret = connect(clientfd, (const struct sockaddr *) &addr, sizeof(addr));
+  ret = connect(clientfd, (const struct sockaddr *) &addr, sizeof(addr)); // 将之前创建的套接字 clientfd 连接到这个地址
   if (ret == -1) {
     LOGGER(4, "connect failed: %s\n", strerror(errno));
     if (close(clientfd) < 0)
@@ -120,13 +129,14 @@ static int open_clientfd(CUdevice device) {
 
 
 /**
- * 调用顺序：initialization : 
- *         cuCtxGetDevice -> (若该 device 未激活) initialization
- *                                            -> cuDeviceGetUuid 得到设备的 uuid 并转换成 gpu_id
- *                                            -> activate_rate_watcher -> 创建 rate_watcher 线程 -> tgs_set_cpu_affinity
- *                                            -> activate_rate_monitor
+ * 更新 Kernel 到达的数量
+ * 调用顺序：
+ * cuCtxGetDevice -> (若该 device 未激活) initialization
+ *                                   -> cuDeviceGetUuid 得到设备的 uuid 并转换成 gpu_id
+ *                                   -> activate_rate_watcher -> 创建 rate_watcher 线程 -> tgs_set_cpu_affinity
+ *                                   -> activate_rate_monitor -> 创建 rate_monitor 线程 -> tgs_set_cpu_affinity
 */
-static inline void rate_estimator(const long long kernel_size) {
+static inline void rate_estimator(const long long kernel_size) { 
   CUdevice device = 0;
   const CUresult ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &device);
   if (ret != CUDA_SUCCESS) {
@@ -136,10 +146,10 @@ static inline void rate_estimator(const long long kernel_size) {
   if (!g_active_gpu[device])
     initialization(device);
   
-  __sync_add_and_fetch_8(&g_rate_counter[device], kernel_size);
+  __sync_add_and_fetch_8(&g_rate_counter[device], kernel_size); // 将 kernel_size 加到 g_rate_counter[device] 上（，并返回相加后的值），该操作是原子的，线程安全的
 }
 
-
+// 通过 Kernel 到达数量，估计 Kernel 到达速率
 static void *rate_monitor(void *v_device) {
   const CUdevice device = (uintptr_t)v_device;
   const unsigned long duration = 5000;
@@ -164,9 +174,9 @@ static void *rate_monitor(void *v_device) {
     else
       req = unit_time;
     
-    g_current_rate[device] = g_rate_counter[device];
+    g_current_rate[device] = g_rate_counter[device]; // g_current_rate 反映了最近一段时间内的 Kernel 到达速率（Kernel Launch 会触发 rate_estimator 进行更新）
 
-    g_rate_counter[device] = 0;
+    g_rate_counter[device] = 0; 
   }
   return NULL;
 }
@@ -178,14 +188,14 @@ inline double shift_window(double rate_window[], const int WINDOW_SIZE, double r
   for (int i = WINDOW_SIZE-1; i > 0; --i) {
     double mean_rate = (rate_window[i] + rate_window[i-1]) / 2;
     max_window_rate = max_window_rate > mean_rate ? max_window_rate : mean_rate;
-    rate_window[i] = rate_window[i-1];
+    rate_window[i] = rate_window[i-1]; // 窗口内的速率向前移动一位
   }
-  rate_window[0] = recv_rate;
+  rate_window[0] = recv_rate; // 将当前的速率放入窗口的首位
 
   return max_window_rate;
 }
 
-
+// 通过 rate_monitor 计算的 Kernel 到达速率，估计一段时间窗口内的最大的 Kernel 到达速率，并将其发送给客户端
 static void *rate_watcher(void *v_device) {
   const CUdevice device = (uintptr_t)v_device;
   const unsigned long duration = 5000;
@@ -211,26 +221,26 @@ static void *rate_watcher(void *v_device) {
         return NULL;
       }
 
-      nanosleep(&listen_time, &rem);
+      nanosleep(&listen_time, &rem); //每次循环会休眠一段时间，减轻对系统资源的压力
       
-      if (loop_cnt < 20) {
+      if (loop_cnt < 20) { // 延迟执行：循环 20 次（期间包括休眠）再计算窗口内的最大速率
         ++loop_cnt;
         continue;
       }
       else
         loop_cnt = 0;
 
-      double rate_counter =  g_current_rate[device];
+      double rate_counter =  g_current_rate[device]; // 从该计数器（由 rate_monitor 更新）中获取当前的速率
       double max_window_rate = shift_window(rate_window, WINDOW_SIZE, (double)rate_counter);
 
       double max_delta = (max_window_rate - max_rate) / max_rate;
       
-      if (max_delta >= -0.2 && max_delta <= 0.2)
-        max_rate = max_rate > max_window_rate ? max_rate : max_window_rate;
+      if (max_delta >= -0.2 && max_delta <= 0.2) // 如果窗口内的最大速率与当前的最大速率相差不大
+        max_rate = max_rate > max_window_rate ? max_rate : max_window_rate; // 则将当前的最大速率更新为窗口内的最大速率
       else
         max_rate = max_window_rate;
     }
-    
+    // 与客户端建立连接后，将当前的最大速率发送给客户端
     if (rio_writen(clientfd, (void *)&max_rate, sizeof(double)) != sizeof(double)) {
       LOGGER(4, "rio_writen error\n");
       continue;
@@ -272,33 +282,33 @@ static void *rate_watcher(void *v_device) {
   return NULL;
 }
 
-
+// 设置特定线程的 CPU 亲和性，即将线程绑定到指定的 CPU 核心上。
 static int tgs_set_cpu_affinity(pthread_t thread_id, int core_id) {
     int ret;
     cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(core_id, &cpuset);
-    ret = pthread_setaffinity_np(thread_id, sizeof(cpuset), &cpuset);
+    CPU_ZERO(&cpuset); //清空 CPU 集合
+    CPU_SET(core_id, &cpuset); //将指定的 core_id 添加到 CPU 集合中
+    ret = pthread_setaffinity_np(thread_id, sizeof(cpuset), &cpuset); // 将线程绑定到特定的一个或多个 CPU 核心上
     if (ret != 0) {
         fprintf(stderr, "failed to set cpu affinity");
         return -1;
     } else {
-        ret = pthread_getaffinity_np(thread_id, sizeof(cpuset), &cpuset);
+        ret = pthread_getaffinity_np(thread_id, sizeof(cpuset), &cpuset); // 获取一个线程的 CPU 亲和性设置。从而检查线程当前绑定到哪些 CPU 核心上
         if (ret != 0) {
             fprintf(stderr, "failed to get cpu affinity");
             return -1;
-        } else {
+        } else { 
             fprintf(stderr, "set returned by pthread_getaffinity_np() contained:");
             int cnt = 0, cpu_in_set = 0;
             for (int i = 0; i < CPU_SETSIZE; i++) {
                 if (CPU_ISSET(i, &cpuset)) {
                     cnt++;
                     cpu_in_set = i;
-                    fprintf(stderr, "  cpu=%d", i);
+                    fprintf(stderr, "  cpu=%d", i); //打印获取到的 CPU 集合中的所有 CPU
                 }
             }
             // this should not happen though
-            if (cnt != 1 || cpu_in_set != core_id) {
+            if (cnt != 1 || cpu_in_set != core_id) { // 检查集合中是否只包含一个 CPU，且该 CPU 是否与指定的 core_id 相同。
                 fprintf(stderr, "failed to set cpu affinity with cpu=%d", core_id);
                 return -1;
             }
@@ -317,7 +327,7 @@ static void activate_rate_watcher(CUdevice device) {
 #ifdef __APPLE__
   pthread_setname_np("rate_watcher");
 #else
-  pthread_setname_np(tid, "rate_watcher");
+  pthread_setname_np(tid, "rate_watcher"); //用于调试目的，设置线程名
 #endif
 }
 
@@ -392,7 +402,8 @@ CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize,
     return ret;
 
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAdvise, *dptr, bytesize, CU_MEM_ADVISE_SET_PREFERRED_LOCATION,
-                         device);
+                         device); 
+  // CUDA 运行时将统一内存分配的内存"首选位置"设置为指定的 GPU 设备
   return ret;
 }
 
